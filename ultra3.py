@@ -4,13 +4,17 @@ from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import json
 import datetime
-# ✅ إضافة timezone هنا لحل مشكلة التحذير
+# ✅ إضافة timezone لحل مشكلة التحذير والوقت
 from datetime import timedelta, timezone
 import re
 import sys
 import time
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ✅ استيراد مكتبة cloudscraper لتجاوز الحظر
+import cloudscraper
+
 # ✅ استيراد مكتبات Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -28,6 +32,20 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
 
+# ==========================================
+# 📡 دالة إرسال التنبيهات (تم رفعها للأعلى لاستخدامها فوراً)
+# ==========================================
+def send_telegram_alert(message):
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        # استخدام cloudscraper هنا أيضاً لضمان الوصول
+        scraper = cloudscraper.create_scraper() 
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        try: 
+            scraper.post(url, data=data, timeout=10)
+        except Exception as e: 
+            print(f"⚠️ Telegram Error: {e}")
+
 # ✅ تهيئة الاتصال بـ Cloud Firestore
 db = None
 if FIREBASE_CREDENTIALS_JSON:
@@ -39,9 +57,13 @@ if FIREBASE_CREDENTIALS_JSON:
         db = firestore.client()
         print("✅ Cloud Firestore Initialized Successfully.")
     except Exception as e:
-        print(f"❌ Firestore Init Error: {e}")
+        err_msg = f"❌ Firestore Init Error: {e}"
+        print(err_msg)
+        send_telegram_alert(err_msg) # 🚨 تنبيه فوري
 else:
-    print("⚠️ Warning: FIREBASE_CREDENTIALS is missing.")
+    msg = "⚠️ Warning: FIREBASE_CREDENTIALS is missing."
+    print(msg)
+    send_telegram_alert(msg) # 🚨 تنبيه فوري
 
 # ==========================================
 # إعداد سيرفر وهمي (Flask)
@@ -50,7 +72,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "I am alive! The Bot is running with Firestore..."
+    return "I am alive! The Bot is running with Firestore & CloudScraper & Error Reporting..."
 
 def run():
     app.run(host='0.0.0.0', port=8080)
@@ -60,27 +82,35 @@ def keep_alive():
     t.start()
 
 # ==========================================
-# 1. إعدادات الاتصال 
+# 1. إعدادات الاتصال (CloudScraper)
 # ==========================================
 BASE_URL = "https://www.ysscores.com"
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Referer': 'https://www.google.dz/',
-    'Accept-Language': 'ar-DZ,ar;q=0.9,fr-DZ;q=0.8,fr;q=0.7,en;q=0.5',
-}
 
-session = requests.Session()
+# ✅ استخدام cloudscraper
+session = cloudscraper.create_scraper(
+    browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    }
+)
+
 retry_strategy = Retry(
     total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504],
 )
 adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry_strategy)
 session.mount("https://", adapter)
 session.mount("http://", adapter)
+
+HEADERS = {
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Referer': 'https://www.google.dz/',
+    'Accept-Language': 'ar-DZ,ar;q=0.9,fr-DZ;q=0.8,fr;q=0.7,en;q=0.5',
+}
 session.headers.update(HEADERS)
 
 # ==========================================
-# 🛠️ الدوال (لم يتم تغيير أي شيء في المنطق)
+# 🛠️ الدوال (لم يتم تغيير المنطق الأساسي)
 # ==========================================
 def convert_to_algeria_time(time_str):
     if not time_str or ":" not in time_str:
@@ -232,7 +262,9 @@ def main_scraper():
         response = session.get(url, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
     except Exception as e:
-        print(f"Error: {e}")
+        err_msg = f"⚠️ Scraping Error (Site might be down/blocked): {e}"
+        print(err_msg)
+        send_telegram_alert(err_msg) # 🚨 إشعار عند فشل سحب الصفحة الرئيسية
         return None
 
     links = set()
@@ -256,42 +288,38 @@ def main_scraper():
 # 🆕 دوال التعامل مع Cloud Firestore
 # ==========================================
 
-# ✅ دالة جديدة: حذف جميع الوثائق في مجموعة 'today' (تستخدم عند بداية يوم جديد)
 def clear_old_matches():
     if not db: return
     try:
         print("🧹 Clearing old matches from Firestore...")
         collection_ref = db.collection('today')
-        # جلب جميع الوثائق لحذفها
         docs = collection_ref.list_documents(page_size=100)
         deleted_count = 0
         for doc in docs:
             doc.delete()
             deleted_count += 1
         print(f"✅ Cleared {deleted_count} old matches.")
+        send_telegram_alert(f"🧹 Cleared {deleted_count} old matches for the new day.") # ✅ إشعار بالتنظيف
     except Exception as e:
-        print(f"❌ Error clearing matches: {e}")
+        err = f"❌ Error clearing matches: {e}"
+        print(err)
+        send_telegram_alert(err)
 
 def update_firestore_db(matches_list):
     if not db:
         return False
         
     try:
-        # استخدام Batch لضمان السرعة في التحديث
         batch = db.batch()
         collection_ref = db.collection('today')
 
         count = 0
         for match in matches_list:
-            # ✅ استخدام ID المباراة كـ Document ID لتجنب التكرار وضمان التحديث
             doc_id = str(match['id']) 
             doc_ref = collection_ref.document(doc_id)
-            
-            # حفظ بيانات المباراة
             batch.set(doc_ref, match, merge=True)
             count += 1
             
-            # Firestore Limit: 500 ops per batch
             if count >= 450:
                 batch.commit()
                 batch = db.batch()
@@ -303,32 +331,24 @@ def update_firestore_db(matches_list):
         print(f"✅ Firestore Updated: {len(matches_list)} matches.")
         return True
     except Exception as e:
-        print(f"❌ Firestore Error: {e}")
+        err = f"❌ Firestore Update Error: {e}"
+        print(err)
+        send_telegram_alert(err) # 🚨 تنبيه فوري
         return False
-
-def send_telegram_alert(message):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-        try: session.post(url, data=data, timeout=5)
-        except: pass
 
 def monitor_matches():
     last_hash = ""
     last_update_day = datetime.date.min
     
     print(f"🚀 Bot Started monitoring {BASE_URL}...")
-    send_telegram_alert("🚀 Bot Started on Render (Firestore).")
+    send_telegram_alert("🚀 Bot Started on Render (Firestore & CloudScraper & Alerts).")
 
     while True:
         try:
             current_data = main_scraper()
             
-            # ✅✅ تعديل: استخدام التوقيت الواعي بالمنطقة الزمنية لتفادي التحذير
-            # نحصل على وقت UTC الحالي بطريقة متوافقة مع النسخ الحديثة
+            # ✅ استخدام التوقيت الواعي بالمنطقة الزمنية
             utc_now = datetime.datetime.now(timezone.utc)
-            
-            # إضافة ساعة للحصول على توقيت الجزائر
             algeria_now = utc_now + timedelta(hours=1)
             current_date = algeria_now.date()
             
@@ -336,19 +356,16 @@ def monitor_matches():
                 current_json_str = json.dumps(current_data, sort_keys=True)
                 current_hash = hashlib.md5(current_json_str.encode('utf-8')).hexdigest()
                 
-                # ✅ التحقق مما إذا دخلنا يوماً جديداً (حسب توقيت الجزائر)
                 force_update = (current_date > last_update_day)
                 
                 if current_hash != last_hash or force_update:
                     if force_update:
                         print(f"🔄 NEW DAY ({current_date}): Clearing old data first...")
-                        # ✅✅ حذف البيانات القديمة عند بداية اليوم الجديد
                         clear_old_matches()
-                        last_update_day = current_date # تحديث تاريخ آخر تحديث
+                        last_update_day = current_date 
                     else:
                         print("🔄 Change detected! Updating...")
 
-                    # ✅ الحفظ في Cloud Firestore
                     if update_firestore_db(current_data):
                         last_hash = current_hash
                 else:
@@ -357,7 +374,9 @@ def monitor_matches():
             time.sleep(CHECK_INTERVAL)
 
         except Exception as e:
-            print(f"⚠️ Loop Error: {e}")
+            critical_err = f"🚨 Critical Loop Error (Bot might stop): {e}"
+            print(critical_err)
+            send_telegram_alert(critical_err) # 🚨 تنبيه هام جداً
             time.sleep(60)
 
 if __name__ == "__main__":
