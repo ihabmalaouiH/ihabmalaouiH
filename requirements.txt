@@ -3,4 +3,3 @@ beautifulsoup4
 firebase-admin
 flask
 urllib3
-cloudscraper
